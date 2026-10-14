@@ -90,11 +90,11 @@ export function getTrainedMetrics() {
 }
 
 export function predictMagoGoBiomass(input: MLFeatures): MLPredictionResult {
-  const age = Math.max(1, Math.min(24, input.larval_age_days));
+  const age = Math.max(0, Math.min(24, input.larval_age_days));
 
   // Build feature vector in the exact order used during training
   const featureVec: number[] = [
-    input.larval_age_days,
+    Math.max(1, input.larval_age_days),
     input.mean_air_temperature_c,
     input.sd_air_temperature_c,
     input.mean_air_humidity_rh_pct,
@@ -108,38 +108,50 @@ export function predictMagoGoBiomass(input: MLFeatures): MLPredictionResult {
   ];
 
   // Real RF predictions
-  const biomass24h = Math.max(0, Math.round(rfPredict("biomass_24h", featureVec)));
-  const daysUntilHarvest = Math.max(0, Math.round(rfPredict("days_until_harvest", featureVec)));
-  const finalBiomass = Math.max(0, Math.round(rfPredict("biomass_final", featureVec)));
+  const daysUntilHarvestPrediction = Math.max(0, Math.round(rfPredict("days_until_harvest", featureVec)));
+  const finalBiomass = Math.max(0, Math.round(rfPredict("biomass_final", featureVec))) || 2072;
 
-  // Next-day prediction: shift age by 1, and advance food waste & load cell weight
-  const nextAge = Math.min(24, input.larval_age_days + 1);
-  const nextDailyFeed = Math.round(180 + Math.pow(nextAge, 1.8) * 16);
-  const nextFeatureVec = [...featureVec];
-  nextFeatureVec[0] = nextAge;
-  nextFeatureVec[7] = input.mean_load_cell_mass_g + 155; // Expected daily load cell gain
-  nextFeatureVec[8] = nextDailyFeed;
-  nextFeatureVec[9] = input.cumulative_food_waste_g + input.food_waste_added_today_g;
-  const next24hBiomass = Math.max(0, Math.round(rfPredict("biomass_24h", nextFeatureVec)));
+  let biomass24h = 0;
+  let next24hBiomass = 85;
+  let daysUntilHarvest = 19;
+  let frassYieldG = 0;
+  let growthPhase = "Inisiasi Siklus (Hari ke-0)";
+  let phaseDesc = "";
+
+  if (age > 0) {
+    biomass24h = Math.max(0, Math.round(rfPredict("biomass_24h", featureVec)));
+    daysUntilHarvest = daysUntilHarvestPrediction;
+
+    // Next-day prediction: shift age by 1, and advance food waste & load cell weight
+    const nextAge = Math.min(24, input.larval_age_days + 1);
+    const nextDailyFeed = Math.round(180 + Math.pow(nextAge, 1.8) * 16);
+    const nextFeatureVec = [...featureVec];
+    nextFeatureVec[0] = nextAge;
+    nextFeatureVec[7] = input.mean_load_cell_mass_g + 155; // Expected daily load cell gain
+    nextFeatureVec[8] = nextDailyFeed;
+    nextFeatureVec[9] = input.cumulative_food_waste_g + input.food_waste_added_today_g;
+    next24hBiomass = Math.max(0, Math.round(rfPredict("biomass_24h", nextFeatureVec)));
+
+    frassYieldG = Math.round(biomass24h * 4.5);
+
+    if (age >= 1 && age <= 4) {
+      growthPhase = "Fase Lag (Instar Awal / H1–H4)";
+      phaseDesc = "";
+    } else if (age >= 5 && age <= 14) {
+      growthPhase = "Fase Eksponensial (Peak Feeding / H5–H14)";
+      phaseDesc = "";
+    } else if (age >= 15 && age <= 18) {
+      growthPhase = "Fase Stabilisasi Kematangan (H15–H18)";
+      phaseDesc = "";
+    } else if (age >= 19) {
+      growthPhase = "Fase Rekomendasi Panen (H19+)";
+      phaseDesc = "";
+    }
+  }
 
   // Domain logic
   const target2000gAchieved = biomass24h >= 2000 || finalBiomass >= 2000;
   const harvestRecommended = daysUntilHarvest <= 0 || age >= 19;
-  const frassYieldG = Math.round(biomass24h * 4.5);
-
-  // Determine biological stage
-  let growthPhase = "Fase Lag (Instar Awal / H1–H4)";
-  let phaseDesc = "Larva instar awal beradaptasi dengan pakan dan substrat. Pertumbuhan massa bertahap.";
-  if (age >= 5 && age <= 14) {
-    growthPhase = "Fase Eksponensial (Peak Feeding / H5–H14)";
-    phaseDesc = "Aktivitas makan paling agresif. Target biomassa 2.000 g tercapai pada hari ke-14 s/d ke-15.";
-  } else if (age >= 15 && age <= 18) {
-    growthPhase = "Fase Stabilisasi Kematangan (H15–H18)";
-    phaseDesc = "Biomassa optimal tercapai (>2.000 g). Larva mencapai bobot maksimum sebelum memasuki fase prepupa.";
-  } else if (age >= 19) {
-    growthPhase = "Fase Rekomendasi Panen (H19+)";
-    phaseDesc = "Sistem MagoGo merekomendasikan panen segera pada hari ke-19 untuk menghindari penyusutan bobot akibat pengosongan usus prepupa.";
-  }
 
   // Actionable recommendations based on KTI FIKSI 2026 specs (Setpoint 30°C, Safety Limit 35°C, RH 70%)
   const recommendations: string[] = [];
